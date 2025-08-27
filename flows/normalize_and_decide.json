@@ -1,0 +1,453 @@
+{
+  "name": "normalize_and_decide_v0_3_tokenizer_tariff",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "Manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -820,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "query": "SELECT id, payload FROM ingest_raw ORDER BY id DESC LIMIT 10;"
+      },
+      "id": "SelectIngest",
+      "name": "Postgres Select ingest_raw",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -580,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalize raw payloads to standard fields\nfunction parsePriceHuf(priceRaw){\n  if (!priceRaw) return null;\n  const s = String(priceRaw).toLowerCase().replace(/\\s+/g,' ').trim();\n  const digits = s.replace(/[^0-9]/g,'');\n  if (!digits) return null;\n  return parseInt(digits,10);\n}\nreturn items.map(it => {\n  const p = it.json.payload || {};\n  const url = p.url || 'unknown';\n  const title = p.title || 'unknown';\n  const price_raw = p.price_raw || '';\n  const crypto = require('crypto');\n  const idempotency_key = crypto.createHash('sha256').update((url||'') + '|' + 'hardverapro').digest('hex').slice(0,32);\n  return { json: {\n    listing_id: url,\n    idempotency_key,\n    title,\n    price_raw,\n    price_huf: parsePriceHuf(price_raw),\n    currency: (String(price_raw).includes('Ft') || String(price_raw).toLowerCase().includes('ft')) ? 'HUF' : null,\n    url,\n    extracted_at: new Date().toISOString()\n  }};\n});\n"
+      },
+      "id": "Normalize",
+      "name": "Code: Normalize",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Required-only validation\nconst required = ['listing_id','idempotency_key','title','price_raw','url'];\nconst ok=[], bad=[];\nfor (const it of items){\n  const j = it.json;\n  const miss = required.filter(k => j[k]===undefined || j[k]===null || String(j[k]).trim()==='');\n  if (miss.length) bad.push({json:{...j, _schema_error:`Missing: ${miss.join(',')}`}});\n  else ok.push({json:j});\n}\nreturn [ok,bad];\n"
+      },
+      "id": "Validate",
+      "name": "Code: Validate (JSON Schema-lite)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "query": "INSERT INTO listing_norm(listing_id,idempotency_key,title,price_raw,price_huf,currency,url,extracted_at)\nVALUES ($1,$2,$3,$4,$5,$6,$7,now())\nON CONFLICT (idempotency_key) DO UPDATE\n  SET title=excluded.title, price_raw=excluded.price_raw, price_huf=excluded.price_huf, currency=excluded.currency, url=excluded.url;",
+        "values": "={{ [$json.listing_id,$json.idempotency_key,$json.title,$json.price_raw,$json.price_huf,$json.currency,$json.url] }}"
+      },
+      "id": "UpsertNorm",
+      "name": "Postgres Upsert listing_norm",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        100,
+        -160
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "SELECT COALESCE((value::text)::int,0) AS spent_huf FROM control_state WHERE key='cost_spent_huf';"
+      },
+      "id": "SelectCost",
+      "name": "Postgres Select cost_spent_huf",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        220
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "return items.map(it => ({ json: { spent_huf: $json.spent_huf } }));"
+      },
+      "id": "FanOutSpent",
+      "name": "Fan-out spent",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "id": "MergeSpent",
+      "name": "Merge (attach spent)",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [
+        100,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ ($env.TOKENIZER_MODE || 'approx').toLowerCase() }}",
+              "operation": "equals",
+              "value2": "http"
+            }
+          ]
+        }
+      },
+      "id": "IfHttpTokenizer",
+      "name": "IF TOKENIZER_MODE=http?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        320,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.TOKENIZER_URL}}",
+        "sendBody": true,
+        "jsonParameters": true,
+        "bodyParametersJson": "={{ { text: JSON.stringify({title: $json.title, price_raw: $json.price_raw, price_huf: $json.price_huf, url: $json.url}), model: $env.LLM_MODEL } }}"
+      },
+      "id": "TokenizerHTTP",
+      "name": "HTTP Tokenizer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        540,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "return items.map(it => ({ json: { ...it.json, _tokens_prompt: ($json.tokens || 0) } }));"
+      },
+      "id": "AdoptTokens",
+      "name": "Code: Adopt tokens",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        760,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Tariff table (HUF) and tokenizer logic\nconst provider = ($env.LLM_PROVIDER || 'openai').toLowerCase();\nconst model = ($env.LLM_MODEL || 'gpt-4o-mini').toLowerCase();\nconst fallbackHufPer1k = parseFloat($env.HUF_PER_1K_TOKENS || '100');\nconst tariff = {\n  openai: {\n    \"gpt-4o-mini\": {prompt_per_1k: 5.0, completion_per_1k: 15.0},\n    \"gpt-4o\": {prompt_per_1k: 25.0, completion_per_1k: 75.0}\n  },\n  ollama: {\n    \"llama3:8b\": {prompt_per_1k: 1.0, completion_per_1k: 1.0},\n    \"llama3:70b\": {prompt_per_1k: 3.0, completion_per_1k: 3.0}\n  }\n};\nconst rate = ((tariff[provider]||{})[model]) || {prompt_per_1k: fallbackHufPer1k, completion_per_1k: fallbackHufPer1k};\n\nfunction approxTokens(text){\n  const chars = String(text||'').length;\n  return Math.max(1, Math.ceil(chars / 3));\n}\n\nreturn items.map(it => {\n  const j = it.json;\n  const promptText = JSON.stringify({title: j.title, price_raw: j.price_raw, price_huf: j.price_huf, url: j.url});\n  let tokens_prompt = j._tokens_prompt;\n  if (!tokens_prompt || tokens_prompt < 1) tokens_prompt = approxTokens(promptText);\n  const cost_huf = Math.ceil(tokens_prompt/1000 * rate.prompt_per_1k);\n\n  const spent = j.spent_huf || 0;\n  const budget = parseInt($env.LLM_BUDGET_HUF || '0',10);\n  const wouldSpend = spent + cost_huf;\n  const degrade = budget > 0 && wouldSpend > budget;\n\n  let decision = 'ELUTASITVA';\n  let explanation = 'Heuristic rule (price threshold)';\n  if (degrade){\n    decision = 'ELUTASITVA (BUDGET LIMIT)';\n    explanation = 'Budget limit reached \u2013 degraded path';\n  } else {\n    decision = (j.price_huf && j.price_huf <= 220000) ? 'JO' : 'ELUTASITVA';\n  }\n\n  return { json: {\n    ...j,\n    _tokens_prompt: tokens_prompt,\n    _cost_prompt_huf: cost_huf,\n    decision, fit_score: 50, risk_score: 3,\n    explanation, evidence: { price_huf: j.price_huf }\n  }};\n});\n"
+      },
+      "id": "Decide",
+      "name": "Code: Decide (with tariff & budget)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        540,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "query": "INSERT INTO decision_audit(listing_id, decision, fit_score, risk_score, explanation, evidence)\nVALUES ($1,$2,$3,$4,$5,$6::jsonb);",
+        "values": "={{ [$json.listing_id, $json.decision, $json.fit_score, $json.risk_score, $json.explanation, JSON.stringify($json.evidence)] }}"
+      },
+      "id": "InsertAudit",
+      "name": "Postgres Insert decision_audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        760,
+        -220
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "UPDATE control_state SET value = to_jsonb( COALESCE((value::text)::int,0) + $1 ), updated_at=now() WHERE key='cost_spent_huf';",
+        "values": "={{ [$json._cost_prompt_huf || 0] }}"
+      },
+      "id": "AccCost",
+      "name": "Postgres Add cost_spent_huf",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        980,
+        -220
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const total = items.length;\nconst sumCost = items.reduce((a,it)=>a + (it.json._cost_prompt_huf||0), 0);\nreturn [{ json: { stage:'normalize', status:'success', items_count: total, cost_estimate_huf: sumCost }}];\n"
+      },
+      "id": "Log",
+      "name": "Code: Log",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -220
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "SchemaErr",
+      "name": "(branch) Schema Errors",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        100,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "query": "INSERT INTO decision_audit(listing_id, decision, fit_score, risk_score, explanation, evidence)\nVALUES ($1,'SOFT FAIL',NULL,NULL,$2,$3::jsonb);",
+        "values": "={{ [$json.listing_id || 'N/A', $json._schema_error || 'Schema validation failed', JSON.stringify($json)] }}"
+      },
+      "id": "AuditSchemaFail",
+      "name": "Postgres Insert audit (schema fail)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        320,
+        240
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Postgres Select ingest_raw",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Select ingest_raw": {
+      "main": [
+        [
+          {
+            "node": "Code: Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Normalize": {
+      "main": [
+        [
+          {
+            "node": "Code: Validate (JSON Schema-lite)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Validate (JSON Schema-lite)": {
+      "main": [
+        [
+          {
+            "node": "Postgres Upsert listing_norm",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "(branch) Schema Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "(branch) Schema Errors": {
+      "main": [
+        [
+          {
+            "node": "Postgres Insert audit (schema fail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Upsert listing_norm": {
+      "main": [
+        [
+          {
+            "node": "Postgres Select cost_spent_huf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Select cost_spent_huf": {
+      "main": [
+        [
+          {
+            "node": "Fan-out spent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan-out spent": {
+      "main": [
+        [
+          {
+            "node": "Merge (attach spent)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge (attach spent)": {
+      "main": [
+        [
+          {
+            "node": "IF TOKENIZER_MODE=http?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code: Decide (with tariff & budget)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF TOKENIZER_MODE=http?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Tokenizer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "HTTP Tokenizer": {
+      "main": [
+        [
+          {
+            "node": "Code: Adopt tokens",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Adopt tokens": {
+      "main": [
+        [
+          {
+            "node": "Code: Decide (with tariff & budget)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Decide (with tariff & budget)": {
+      "main": [
+        [
+          {
+            "node": "Postgres Insert decision_audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Insert decision_audit": {
+      "main": [
+        [
+          {
+            "node": "Postgres Add cost_spent_huf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Add cost_spent_huf": {
+      "main": [
+        [
+          {
+            "node": "Code: Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

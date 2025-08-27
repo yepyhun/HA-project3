@@ -1,0 +1,713 @@
+{
+  "name": "ingest_raw_v0_3_domparser_alerts",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "Manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "mode",
+              "value": "={{ $env.MODE || 'offline' }}"
+            },
+            {
+              "name": "searchUrl",
+              "value": "={{ $env.HARDVERAPRO_SEARCH_URL }}"
+            },
+            {
+              "name": "query",
+              "value": "={{ $env.SEARCH_QUERY || 'rtx 3080' }}"
+            },
+            {
+              "name": "rateMs",
+              "value": "={{ $env.RATE_LIMIT_MS || 750 }}"
+            }
+          ]
+        }
+      },
+      "id": "SetMode",
+      "name": "Set Mode",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        -700,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "query": "SELECT value FROM control_state WHERE key='network_fail_streak';"
+      },
+      "id": "GetStreak",
+      "name": "Postgres Get fail streak",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Evaluate fail streak against threshold\nconst th = parseInt($env.KILL_SWITCH_THRESHOLD || '2', 10);\nconst raw = $json.value;\nlet streak = 0;\ntry {\n  if (typeof raw === 'number') streak = raw;\n  else if (typeof raw === 'string') streak = parseInt(raw, 10) || 0;\n  else if (raw && typeof raw === 'object') {\n    const m = JSON.stringify(raw).match(/\\d+/);\n    if (m) streak = parseInt(m[0],10);\n  }\n} catch {}\nreturn [{ json: { streak, threshold: th, kill: (streak >= th) } }];\n"
+      },
+      "id": "EvalStreak",
+      "name": "Code: Eval Streak",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.kill}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "IfKill",
+      "name": "IF KillSwitch?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.searchUrl}}",
+        "options": {
+          "headersUi": {
+            "parameter": [
+              {
+                "name": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+              },
+              {
+                "name": "Cookie",
+                "value": "prf_ls_uad=lstup.d.200.normal"
+              }
+            ]
+          },
+          "queryParametersUi": {
+            "parameter": [
+              {
+                "name": "q",
+                "value": "={{$json.query}}"
+              }
+            ]
+          },
+          "ignoreResponseCode": true,
+          "responseFormat": "string",
+          "timeout": 30
+        }
+      },
+      "id": "Http",
+      "name": "HTTP Request (live HTML)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        200,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "return [{ json: { ok: ($json.statusCode && $json.statusCode < 400) } }];"
+      },
+      "id": "HttpOK",
+      "name": "Code: status OK?",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        200,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.ok}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "IfHttpOK",
+      "name": "IF HTTP ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "query": "UPDATE control_state SET value = to_jsonb(0), updated_at=now() WHERE key='network_fail_streak';"
+      },
+      "id": "StreakReset",
+      "name": "Postgres streak=0",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        420,
+        -200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {},
+        "sourceData": "json",
+        "dataPropertyName": "body",
+        "extractionValues": [
+          {
+            "key": "a_href",
+            "cssSelector": ".uad-list .media h1 a",
+            "returnArray": true,
+            "attribute": "href"
+          },
+          {
+            "key": "a_text",
+            "cssSelector": ".uad-list .media h1 a",
+            "returnArray": true
+          },
+          {
+            "key": "price",
+            "cssSelector": ".uad-list .media .uad-price",
+            "returnArray": true
+          }
+        ]
+      },
+      "id": "HtmlExtract",
+      "name": "HTML Extract (selectors)",
+      "type": "n8n-nodes-base.htmlExtract",
+      "typeVersion": 2,
+      "position": [
+        640,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Pack arrays from HTML Extract into per-item objects\nconst base = 'https://hardverapro.hu';\nconst hrefs = $json.a_href || [];\nconst titles = $json.a_text || [];\nconst prices = $json.price || [];\nconst items = [];\nconst n = Math.max(hrefs.length, titles.length, prices.length);\nfunction sanitize(s){ return (s||'').replace(/\\s+/g,' ').trim(); }\nfor (let i=0;i<n;i++){\n  let url = hrefs[i] || '';\n  if (url && !url.startsWith('http')) url = base + url;\n  const title = sanitize(titles[i] || '');\n  const price_raw = sanitize(prices[i] || '');\n  if (url && title) items.push({ url, title, price_raw, source:'live' });\n}\nif (items.length === 0){\n  return [{ json: { _zero_match: true } }];\n}\nreturn items.map(x => ({ json: x }));\n"
+      },
+      "id": "PackItems",
+      "name": "Code: Pack by selector-map",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        860,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json._zero_match}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "IfZero",
+      "name": "IF zero-match?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1080,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "query": "INSERT INTO ingest_raw(source, payload) VALUES ($1, $2::jsonb);",
+        "values": "={{ ['live', JSON.stringify($json)] }}"
+      },
+      "id": "InsertLive",
+      "name": "Postgres Insert ingest_raw (live)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        -200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "filePath": "/project/sample_data.ndjson"
+      },
+      "id": "ReadSample",
+      "name": "Read sample_data.ndjson",
+      "type": "n8n-nodes-base.readBinaryFile",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "data"
+      },
+      "id": "BinToText",
+      "name": "Binary \u2192 Text",
+      "type": "n8n-nodes-base.binaryToText",
+      "typeVersion": 1,
+      "position": [
+        420,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const ls=($json.data||'').split('\\n').filter(Boolean); return ls.map(l=>({json:JSON.parse(l)}));"
+      },
+      "id": "ParseNDJSON",
+      "name": "Code: Parse NDJSON",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        640,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "query": "INSERT INTO ingest_raw(source, payload) VALUES ($1, $2::jsonb);",
+        "values": "={{ ['sample', JSON.stringify($json)] }}"
+      },
+      "id": "InsertSample",
+      "name": "Postgres Insert ingest_raw (sample)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        860,
+        200
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "UPDATE control_state SET value = to_jsonb( COALESCE((value::text)::int,0) + 1 ), updated_at=now() WHERE key='network_fail_streak';"
+      },
+      "id": "StreakInc",
+      "name": "Postgres streak++",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        420,
+        40
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "={{$env.PGDATABASE}}",
+          "name": "ENV_PG"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build alert payload + URLs from ENV\nconst text = $json.message || 'Kill-switch/Selector fallback triggered';\nconst slack = $env.SLACK_WEBHOOK_URL || '';\nconst tgToken = $env.TELEGRAM_BOT_TOKEN || '';\nconst tgChat = $env.TELEGRAM_CHAT_ID || '';\nlet tgUrl = '';\nif (tgToken && tgChat){\n  tgUrl = 'https://api.telegram.org/bot' + tgToken + '/sendMessage';\n}\nreturn [{ json: { text: `[Modularis Partner] ${text}`, slack_url: slack, telegram_url: tgUrl, telegram_chat_id: tgChat } }];\n"
+      },
+      "id": "BuildAlert",
+      "name": "Code: Build Alert",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [
+        420,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.slack_url}}",
+              "operation": "notEqual",
+              "value2": ""
+            }
+          ]
+        }
+      },
+      "id": "IfSlack",
+      "name": "IF Slack URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        640,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.telegram_url}}",
+              "operation": "notEqual",
+              "value2": ""
+            }
+          ]
+        }
+      },
+      "id": "IfTelegram",
+      "name": "IF Telegram URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        640,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.slack_url}}",
+        "options": {
+          "ignoreResponseCode": true
+        },
+        "sendBody": true,
+        "jsonParameters": true,
+        "bodyParametersJson": "={{ { text: $json.text } }}"
+      },
+      "id": "Slack",
+      "name": "HTTP \u2192 Slack Webhook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        860,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.telegram_url}}",
+        "sendBody": true,
+        "jsonParameters": true,
+        "options": {
+          "ignoreResponseCode": true
+        },
+        "bodyParametersJson": "={{ { chat_id: $json.telegram_chat_id, text: $json.text } }}"
+      },
+      "id": "Telegram",
+      "name": "HTTP \u2192 Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        860,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Mode": {
+      "main": [
+        [
+          {
+            "node": "Postgres Get fail streak",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres Get fail streak": {
+      "main": [
+        [
+          {
+            "node": "Code: Eval Streak",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Eval Streak": {
+      "main": [
+        [
+          {
+            "node": "IF KillSwitch?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF KillSwitch?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request (live HTML)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read sample_data.ndjson",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code: Build Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request (live HTML)": {
+      "main": [
+        [
+          {
+            "node": "Code: status OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: status OK?": {
+      "main": [
+        [
+          {
+            "node": "IF HTTP ok?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres streak++",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code: Build Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read sample_data.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF HTTP ok?": {
+      "main": [
+        [
+          {
+            "node": "Postgres streak=0",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Postgres streak++",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code: Build Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read sample_data.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres streak=0": {
+      "main": [
+        [
+          {
+            "node": "HTML Extract (selectors)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML Extract (selectors)": {
+      "main": [
+        [
+          {
+            "node": "Code: Pack by selector-map",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Pack by selector-map": {
+      "main": [
+        [
+          {
+            "node": "IF zero-match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF zero-match?": {
+      "main": [
+        [
+          {
+            "node": "Postgres Insert ingest_raw (live)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code: Build Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read sample_data.ndjson",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read sample_data.ndjson": {
+      "main": [
+        [
+          {
+            "node": "Binary \u2192 Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Binary \u2192 Text": {
+      "main": [
+        [
+          {
+            "node": "Code: Parse NDJSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Parse NDJSON": {
+      "main": [
+        [
+          {
+            "node": "Postgres Insert ingest_raw (sample)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Build Alert": {
+      "main": [
+        [
+          {
+            "node": "IF Slack URL?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF Telegram URL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Slack URL?": {
+      "main": [
+        [
+          {
+            "node": "HTTP \u2192 Slack Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "IF Telegram URL?": {
+      "main": [
+        [
+          {
+            "node": "HTTP \u2192 Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  }
+}
